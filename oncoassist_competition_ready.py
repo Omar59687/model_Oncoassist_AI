@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 
 import joblib
 import numpy as np
@@ -36,7 +36,7 @@ tf.random.set_seed(42)
 # ==================================================
 
 
-'''
+"""
 Purpose of this function
 
 This function:
@@ -49,7 +49,8 @@ separates features and labels
 converts labels into binary format
 
 This is one of the most important functions in the script.
-'''
+"""
+
 
 def load_and_align_multiomics(
     rna_path: Path,
@@ -145,7 +146,7 @@ def load_and_align_multiomics(
 # Input: training DataFrames per modality
 # Output: fitted sklearn pipelines
 
-'''
+"""
 This function creates a preprocessing pipeline that will be used for each omics dataset:
 
 RNA
@@ -153,7 +154,7 @@ DNA methylation
 CNA
 
 So instead of preprocessing each dataset manually, the script uses one reusable function.
-'''
+"""
 
 
 def build_preprocessor() -> Pipeline:
@@ -173,7 +174,7 @@ def build_preprocessor() -> Pipeline:
 # Input: preprocessed modality matrices
 # Output: trained encoder models and concatenated latent representation
 
-'''
+"""
 This section is the feature learning part of the pipeline.
 
 Instead of feeding the raw RNA, DNA, and CNA features directly into the final classifier, the script first compresses each modality into a smaller learned representation called a latent vector.
@@ -201,7 +202,7 @@ preprocessed RNA / DNA / CNA
 → get smaller latent vectors
 → join them together
 → send to logistic regression
-'''
+"""
 
 
 def build_autoencoder(input_dim: int, latent_dim: int) -> Tuple[Model, Model]:
@@ -216,9 +217,11 @@ def build_autoencoder(input_dim: int, latent_dim: int) -> Tuple[Model, Model]:
     autoencoder.compile(optimizer="adam", loss="mse")
     return autoencoder, encoder
 
-'''
+
+"""
 This function trains an autoencoder and returns only the encoder.
-'''
+"""
+
 
 def fit_encoder(X_train: np.ndarray, X_val: np.ndarray, latent_dim: int) -> Model:
     autoencoder, encoder = build_autoencoder(
@@ -238,9 +241,11 @@ def fit_encoder(X_train: np.ndarray, X_val: np.ndarray, latent_dim: int) -> Mode
     )
     return encoder
 
-'''
+
+"""
 This function takes the trained encoders and uses them to transform full datasets into latent features.
-'''
+"""
+
 
 def transform_latent(
     encoder_rna: Model,
@@ -271,7 +276,7 @@ def transform_latent(
 # Input: latent train matrix + train labels
 # Output: augmented latent train matrix and labels
 
-'''
+"""
 This section fixes class imbalance.
 
 That means if one class has fewer samples than the other, the script creates extra training samples for the minority class so the classifier does not become biased toward the majority class.
@@ -279,7 +284,7 @@ That means if one class has fewer samples than the other, the script creates ext
 Very important: it does this only on the training set, not on the test set.
 
 That is why the comment says train-only, non-leaky.
-'''
+"""
 
 
 def augment_minority_class(
@@ -311,8 +316,12 @@ def augment_minority_class(
     augmentation_source = "bootstrap_fallback"
 
     try:
-        from sdv.metadata import SingleTableMetadata
-        from sdv.single_table import CTGANSynthesizer
+        import importlib
+
+        sdv_metadata_module = importlib.import_module("sdv.metadata")
+        sdv_single_table_module = importlib.import_module("sdv.single_table")
+        SingleTableMetadata = getattr(sdv_metadata_module, "SingleTableMetadata")
+        CTGANSynthesizer = getattr(sdv_single_table_module, "CTGANSynthesizer")
 
         latent_df = pd.DataFrame(minority_data)
         metadata = SingleTableMetadata()
@@ -322,16 +331,19 @@ def augment_minority_class(
         )
         ctgan.fit(latent_df)
         synthetic_df = ctgan.sample(needed)
-        synthetic_samples = synthetic_df.values.astype(np.float32)
+        synthetic_samples = np.asarray(synthetic_df, dtype=np.float32)
         augmentation_source = "ctgan"
     except Exception:
         # If SDV/CTGAN is unavailable, we keep augmentation deterministic and simple.
-        synthetic_samples = resample(
-            minority_data,
-            replace=True,
-            n_samples=needed,
-            random_state=random_state,
-        ).astype(np.float32)
+        synthetic_samples = np.asarray(
+            resample(
+                minority_data,
+                replace=True,
+                n_samples=needed,
+                random_state=random_state,
+            ),
+            dtype=np.float32,
+        )
         noise = np.random.normal(0, 0.01, size=synthetic_samples.shape).astype(
             np.float32
         )
@@ -366,7 +378,7 @@ def augment_minority_class(
 # Input: augmented latent train data
 # Output: fitted classifier and ensemble members
 
-'''
+"""
 🔹 Big idea of Section 5
 
 This section introduces:
@@ -385,7 +397,8 @@ This section introduces:
 
 distance (OOD detection)
 data completeness
-'''
+"""
+
 
 def train_disagreement_ensemble(
     X_train: np.ndarray, y_train: np.ndarray, n_models: int = 5
@@ -422,6 +435,83 @@ def compute_data_completeness(
 
 
 # =========================================
+# SECTION 6A: Gene-level explainer (Option 1)
+# =========================================
+# What: train a secondary interpretable model in preprocessed feature space
+# Why: provide top contributing genes/features while keeping latent model untouched
+
+
+def build_gene_feature_names(feature_columns: Dict[str, List[str]]) -> List[str]:
+    names = []
+    names.extend([f"mGE::{c}" for c in feature_columns["rna"]])
+    names.extend([f"mDM::{c}" for c in feature_columns["dna"]])
+    names.extend([f"CNA::{c}" for c in feature_columns["cna"]])
+    return names
+
+
+def stack_preprocessed_modalities(
+    X_rna: np.ndarray,
+    X_dna: np.ndarray,
+    X_cna: np.ndarray,
+) -> np.ndarray:
+    return np.concatenate([X_rna, X_dna, X_cna], axis=1)
+
+
+def train_gene_explainer(
+    X_gene_train: np.ndarray,
+    y_train: np.ndarray,
+    random_state: int = 42,
+) -> LogisticRegression:
+    explainer = LogisticRegression(
+        penalty="l1",
+        solver="saga",
+        C=0.5,
+        max_iter=5000,
+        class_weight="balanced",
+        random_state=random_state,
+    )
+    explainer.fit(X_gene_train, y_train)
+    return explainer
+
+
+def explain_top_genes_from_explainer(
+    gene_vector: np.ndarray,
+    prob_high_tmb: float,
+    gene_explainer: LogisticRegression,
+    gene_feature_names: List[str],
+    top_k: int = 5,
+) -> Dict[str, Any]:
+    coef = gene_explainer.coef_.reshape(-1)
+    contributions = gene_vector.reshape(-1) * coef
+
+    top_indices = np.argsort(np.abs(contributions))[-top_k:][::-1]
+    top_genes = []
+    for idx in top_indices:
+        contribution = float(contributions[idx])
+        direction = "supports_high_tmb" if contribution >= 0 else "supports_low_tmb"
+        top_genes.append(
+            {
+                "feature_name": gene_feature_names[int(idx)],
+                "contribution": round(contribution, 6),
+                "direction": direction,
+            }
+        )
+
+    predicted_class = "High-TMB" if prob_high_tmb >= 0.5 else "Low-TMB"
+    confidence = float(max(prob_high_tmb, 1.0 - prob_high_tmb))
+
+    return {
+        "predicted_class": predicted_class,
+        "confidence": round(confidence, 6),
+        "top_contributing_genes": top_genes,
+        "gene_explanation_summary": (
+            "Top contributors are produced by a secondary L1-logistic explainer trained "
+            "in preprocessed feature space. Primary prediction still comes from the latent-space model."
+        ),
+    }
+
+
+# =========================================
 # SECTION 6: Explainability layer
 # =========================================
 # What: honest latent-space explanation and modality contribution ranking
@@ -430,7 +520,7 @@ def compute_data_completeness(
 # Output: structured explanation dictionary
 
 
-'''
+"""
 This section explains why the model made a prediction.
 
 But it does it in a careful way.
@@ -448,7 +538,8 @@ It correctly says:
 
 ✅ “Latent components and modalities contributed”
 
-'''
+"""
+
 
 def explain_latent_prediction(
     latent_vector: np.ndarray,
@@ -519,7 +610,7 @@ def explain_latent_prediction(
 # Output: structured reliability dictionary
 
 
-'''
+"""
 This section is one of the most important parts of the whole script.
 
 Why?
@@ -536,7 +627,8 @@ It should also say:
 “Should this be treated with caution?”
 
 That is exactly what Section 7 does.
-'''
+"""
+
 
 def reliability_assessment(
     prob_high_tmb: float,
@@ -631,6 +723,7 @@ def build_clinical_output(
     prob_high_tmb: float,
     explanation: Dict[str, Any],
     reliability: Dict[str, Any],
+    gene_explanation: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     # =========================================
     # SECTION 8: Clinical decision-support report
@@ -646,22 +739,22 @@ def build_clinical_output(
     # Where to place: final stage of inference after explainability + reliability are computed
     # ==================================================
 
-    '''
-    This section takes the outputs from the earlier sections and turns them into a final report object that is ready for:
+    """
+        This section takes the outputs from the earlier sections and turns them into a final report object that is ready for:
 
-frontend display
-JSON export
-API response
-safer clinical-style interpretation
+    frontend display
+    JSON export
+    API response
+    safer clinical-style interpretation
 
-So before this section, the script has separate pieces:
+    So before this section, the script has separate pieces:
 
-prediction probability
-explainability info
-reliability info
+    prediction probability
+    explainability info
+    reliability info
 
-Section 8 combines them into one final structured report.
-'''
+    Section 8 combines them into one final structured report.
+    """
 
     prediction = "High-TMB" if prob_high_tmb >= 0.5 else "Low-TMB"
     predicted_tmb_category = (
@@ -679,6 +772,15 @@ Section 8 combines them into one final structured report.
             "This output is decision-support only and should be clinically validated."
         )
 
+    if gene_explanation is None:
+        top_genes = []
+        gene_explanation_summary = (
+            "No gene-level explainer output available for this run."
+        )
+    else:
+        top_genes = gene_explanation["top_contributing_genes"]
+        gene_explanation_summary = gene_explanation["gene_explanation_summary"]
+
     return {
         "prediction": prediction,
         "predicted_tmb_category": predicted_tmb_category,
@@ -690,6 +792,8 @@ Section 8 combines them into one final structured report.
         "out_of_distribution_risk": reliability["out_of_distribution_risk"],
         "main_contributing_omics": explanation["dominant_omics"],
         "top_model_signals": explanation["top_contributing_signals"],
+        "top_contributing_genes": top_genes,
+        "gene_explanation_summary": gene_explanation_summary,
         "dominant_omics": explanation["dominant_omics"],
         "top_contributing_signals": explanation["top_contributing_signals"],
         "explanation_summary": explanation["explanation_summary"],
@@ -710,6 +814,23 @@ Section 8 combines them into one final structured report.
 # Input: loaded bundle + one-row DataFrames for each omics modality
 # Output: one structured clinical report dictionary
 
+"""
+This section is very important for deployment/integration.
+
+Earlier sections were mostly about:
+
+training
+explanation
+reliability
+report building
+
+Section 9 answers a different question:
+
+After I save the trained artifacts, how do I use them later on one new sample?
+
+That is exactly what this section does.
+"""
+
 
 def build_report_from_loaded_bundle(
     loaded_bundle: Dict[str, Any],
@@ -722,13 +843,14 @@ def build_report_from_loaded_bundle(
     pre_cna = loaded_bundle["preprocessors"]["cna"]
 
     feature_cols = loaded_bundle["feature_columns"]
-    raw_rna_row = raw_rna_row[feature_cols["rna"]]
-    raw_dna_row = raw_dna_row[feature_cols["dna"]]
-    raw_cna_row = raw_cna_row[feature_cols["cna"]]
+    raw_rna_row = pd.DataFrame(raw_rna_row.loc[:, feature_cols["rna"]])
+    raw_dna_row = pd.DataFrame(raw_dna_row.loc[:, feature_cols["dna"]])
+    raw_cna_row = pd.DataFrame(raw_cna_row.loc[:, feature_cols["cna"]])
 
     x_rna = pre_rna.transform(raw_rna_row)
     x_dna = pre_dna.transform(raw_dna_row)
     x_cna = pre_cna.transform(raw_cna_row)
+    x_gene = stack_preprocessed_modalities(x_rna, x_dna, x_cna)
 
     encoder_rna = loaded_bundle["encoders"]["rna"]
     encoder_dna = loaded_bundle["encoders"]["dna"]
@@ -767,10 +889,26 @@ def build_report_from_loaded_bundle(
         disagreement_std_threshold=rel_cfg["disagreement_std_threshold"],
     )
 
+    gene_explanation = None
+    if (
+        "gene_explainer_model" in loaded_bundle
+        and "gene_feature_names" in loaded_bundle
+    ):
+        gene_explanation = explain_top_genes_from_explainer(
+            gene_vector=x_gene[0],
+            prob_high_tmb=prob_high,
+            gene_explainer=loaded_bundle["gene_explainer_model"],
+            gene_feature_names=loaded_bundle["gene_feature_names"],
+            top_k=loaded_bundle.get("explainability_config", {}).get(
+                "top_k_signals", 5
+            ),
+        )
+
     return build_clinical_output(
         prob_high_tmb=prob_high,
         explanation=explanation,
         reliability=reliability,
+        gene_explanation=gene_explanation,
     )
 
 
@@ -903,6 +1041,11 @@ def main() -> None:
     X_dna_test = pre_dna.transform(X_dna_test_df)
     X_cna_test = pre_cna.transform(X_cna_test_df)
 
+    X_gene_train = stack_preprocessed_modalities(X_rna_train, X_dna_train, X_cna_train)
+    X_gene_test = stack_preprocessed_modalities(X_rna_test, X_dna_test, X_cna_test)
+    gene_feature_names = build_gene_feature_names(data["feature_columns"])
+    gene_explainer_model = train_gene_explainer(X_gene_train, y_train)
+
     latent_rna_dim = min(16, X_rna_train.shape[1])
     latent_dna_dim = min(16, X_dna_train.shape[1])
     latent_cna_dim = min(8, X_cna_train.shape[1])
@@ -964,6 +1107,7 @@ def main() -> None:
     demo_idx = 0
     demo_prob = float(y_test_prob[demo_idx])
     demo_latent = X_latent_test[demo_idx]
+    demo_gene_vector = X_gene_test[demo_idx]
 
     demo_completeness = compute_data_completeness(
         X_rna_test_df.iloc[[demo_idx]],
@@ -976,6 +1120,14 @@ def main() -> None:
         prob_high_tmb=demo_prob,
         classifier=classifier,
         modality_slices=modality_slices,
+        top_k=5,
+    )
+
+    gene_explanation = explain_top_genes_from_explainer(
+        gene_vector=demo_gene_vector,
+        prob_high_tmb=demo_prob,
+        gene_explainer=gene_explainer_model,
+        gene_feature_names=gene_feature_names,
         top_k=5,
     )
 
@@ -993,6 +1145,7 @@ def main() -> None:
         prob_high_tmb=demo_prob,
         explanation=explanation,
         reliability=reliability,
+        gene_explanation=gene_explanation,
     )
 
     export_dir = base_dir / "export_artifacts"
@@ -1004,6 +1157,8 @@ def main() -> None:
         payload={
             "preprocessors": {"rna": pre_rna, "dna": pre_dna, "cna": pre_cna},
             "classifier": classifier,
+            "gene_explainer_model": gene_explainer_model,
+            "gene_feature_names": gene_feature_names,
             "disagreement_models": disagreement_models,
             "feature_columns": data["feature_columns"],
             "label_mapping": data["label_mapping"],
@@ -1017,6 +1172,7 @@ def main() -> None:
             "explainability_config": {
                 "top_k_signals": 5,
                 "note": "Latent-space and modality-level explanation only; no raw top-gene attribution.",
+                "gene_explainer_note": "Top contributing genes/features are from secondary L1-logistic explainer in preprocessed feature space.",
             },
             "ood_stats": {
                 "train_mean": train_mean,
@@ -1045,6 +1201,9 @@ def main() -> None:
 
     print("\n=== AFTER EXPLAINABILITY BLOCK ===")
     print(json.dumps(explanation, indent=2))
+
+    print("\n=== AFTER TOP-5 GENE EXPLAINER BLOCK ===")
+    print(json.dumps(gene_explanation, indent=2))
 
     print("\n=== AFTER RELIABILITY BLOCK ===")
     print(json.dumps(reliability, indent=2))
