@@ -1,4 +1,5 @@
 import json
+import argparse
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
 
@@ -6,12 +7,24 @@ import joblib
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+import matplotlib.pyplot as plt
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, classification_report, roc_auc_score
-from sklearn.model_selection import train_test_split
+from sklearn.metrics import (
+    accuracy_score,
+    brier_score_loss,
+    classification_report,
+    precision_recall_fscore_support,
+    roc_auc_score,
+)
+from sklearn.model_selection import RepeatedStratifiedKFold, train_test_split
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
 from sklearn.utils import resample
 from tensorflow.keras import Model
 from tensorflow.keras.callbacks import EarlyStopping
@@ -56,6 +69,7 @@ def load_and_align_multiomics(
     rna_path: Path,
     dna_path: Path,
     cna_path: Path,
+    high_label_value: Optional[str] = None,
 ) -> Dict[str, Any]:
     rna_df = pd.read_csv(rna_path)
     dna_df = pd.read_csv(dna_path)
@@ -92,9 +106,10 @@ def load_and_align_multiomics(
         .loc[common_ids]
     )
 
-    rna_feature_cols = [c for c in rna_df.columns if c != "CLASS"]
-    dna_feature_cols = list(dna_df.columns)
-    cna_feature_cols = list(cna_df.columns)
+    reserved_non_feature_cols = {"CLASS"}
+    rna_feature_cols = [c for c in rna_df.columns if c not in reserved_non_feature_cols]
+    dna_feature_cols = [c for c in dna_df.columns if c not in reserved_non_feature_cols]
+    cna_feature_cols = [c for c in cna_df.columns if c not in reserved_non_feature_cols]
 
     X_rna = rna_df[rna_feature_cols]
     X_dna = dna_df[dna_feature_cols]
@@ -115,12 +130,38 @@ def load_and_align_multiomics(
     # Assumption used here: lower CLASS value -> Low-TMB, higher CLASS value -> High-TMB.
     low_label = unique_labels[0]
     high_label = unique_labels[-1]
+    label_assumption = "ordered_labels"
+    if high_label_value is not None:
+        parsed_high_label = high_label_value
+        numeric_labels = all(
+            isinstance(v, (int, float, np.integer, np.floating)) for v in unique_labels
+        )
+        if numeric_labels:
+            try:
+                parsed_high_label = float(high_label_value)
+                matched = [v for v in unique_labels if float(v) == parsed_high_label]
+                if len(matched) == 1:
+                    parsed_high_label = matched[0]
+            except ValueError:
+                pass
+        if parsed_high_label not in unique_labels:
+            raise ValueError(
+                f"Provided high_label_value={high_label_value} not found in CLASS labels {unique_labels}"
+            )
+        high_label = parsed_high_label
+        low_candidates = [v for v in unique_labels if v != high_label]
+        if len(low_candidates) != 1:
+            raise ValueError("Binary labels expected but could not infer low label.")
+        low_label = low_candidates[0]
+        label_assumption = "user_provided_high_label"
     y_binary = (y_raw == high_label).astype(int)
 
     label_mapping = {
         "raw_to_binary": {str(low_label): 0, str(high_label): 1},
         "binary_to_tmb": {0: "Low-TMB", 1: "High-TMB"},
         "raw_semantics": {str(low_label): "Low-TMB", str(high_label): "High-TMB"},
+        "assumption_mode": label_assumption,
+        "available_class_labels": [str(v) for v in unique_labels],
     }
 
     return {
@@ -290,6 +331,7 @@ That is why the comment says train-only, non-leaky.
 def augment_minority_class(
     X_latent_train: np.ndarray,
     y_train: np.ndarray,
+    mode: str = "ctgan_or_bootstrap",
     random_state: int = 42,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     classes, counts = np.unique(y_train, return_counts=True)
@@ -299,14 +341,16 @@ def augment_minority_class(
     majority_count = counts[np.argmax(counts)]
     needed = max(0, majority_count - minority_count)
 
-    if needed == 0:
+    if needed == 0 or mode == "none":
         return (
             X_latent_train,
             y_train,
             {
-                "augmentation_source": "none",
+                "augmentation_source": "none" if needed == 0 else "disabled",
                 "minority_class": int(minority_class),
                 "added_samples": 0,
+                "ctgan_attempted": False,
+                "ctgan_error": None,
             },
         )
 
@@ -314,8 +358,11 @@ def augment_minority_class(
 
     synthetic_samples: np.ndarray
     augmentation_source = "bootstrap_fallback"
+    ctgan_error: Optional[str] = None
 
     try:
+        if mode == "bootstrap":
+            raise RuntimeError("Bootstrap mode requested")
         import importlib
 
         sdv_metadata_module = importlib.import_module("sdv.metadata")
@@ -333,7 +380,12 @@ def augment_minority_class(
         synthetic_df = ctgan.sample(needed)
         synthetic_samples = np.asarray(synthetic_df, dtype=np.float32)
         augmentation_source = "ctgan"
-    except Exception:
+        ctgan_error = None
+    except Exception as e:
+        if mode == "bootstrap":
+            ctgan_error = None
+        else:
+            ctgan_error = f"{type(e).__name__}: {e}"
         # If SDV/CTGAN is unavailable, we keep augmentation deterministic and simple.
         synthetic_samples = np.asarray(
             resample(
@@ -366,6 +418,8 @@ def augment_minority_class(
             "minority_class": int(minority_class),
             "majority_class": int(majority_class),
             "added_samples": int(needed),
+            "ctgan_attempted": mode == "ctgan_or_bootstrap",
+            "ctgan_error": ctgan_error,
         },
     )
 
@@ -719,6 +773,578 @@ def reliability_assessment(
     }
 
 
+def compute_binary_metrics(y_true: np.ndarray, y_prob: np.ndarray) -> Dict[str, Any]:
+    y_pred = (y_prob >= 0.5).astype(int)
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, average="binary"
+    )
+    return {
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "auc_roc": float(roc_auc_score(y_true, y_prob)),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+        "brier_score": float(brier_score_loss(y_true, y_prob)),
+        "classification_report": classification_report(
+            y_true, y_pred, output_dict=True
+        ),
+    }
+
+
+def expected_calibration_error(
+    y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10
+) -> float:
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    ids = np.digitize(y_prob, bins) - 1
+    ece = 0.0
+    n = len(y_prob)
+    for b in range(n_bins):
+        idx = ids == b
+        if np.sum(idx) == 0:
+            continue
+        acc = np.mean(y_true[idx])
+        conf = np.mean(y_prob[idx])
+        ece += (np.sum(idx) / n) * abs(acc - conf)
+    return float(ece)
+
+
+def plot_reliability_diagram(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    output_path: Path,
+    title: str,
+) -> Dict[str, Any]:
+    frac_pos, mean_pred = calibration_curve(
+        y_true, y_prob, n_bins=10, strategy="uniform"
+    )
+    plt.figure(figsize=(6, 6))
+    plt.plot([0, 1], [0, 1], "k--", linewidth=1)
+    plt.plot(mean_pred, frac_pos, marker="o")
+    plt.xlabel("Predicted probability")
+    plt.ylabel("Observed frequency")
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+    return {
+        "path": str(output_path),
+        "ece": expected_calibration_error(y_true, y_prob),
+    }
+
+
+def plot_coverage_risk_curve(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    output_path: Path,
+    title: str,
+) -> Dict[str, Any]:
+    confidence = np.maximum(y_prob, 1 - y_prob)
+    y_pred = (y_prob >= 0.5).astype(int)
+    correctness = (y_pred == y_true).astype(int)
+    order = np.argsort(-confidence)
+    correctness_sorted = correctness[order]
+    coverage_values = []
+    risk_values = []
+    for k in range(1, len(y_true) + 1):
+        cov = k / len(y_true)
+        risk = 1.0 - float(np.mean(correctness_sorted[:k]))
+        coverage_values.append(cov)
+        risk_values.append(risk)
+
+    plt.figure(figsize=(7, 5))
+    plt.plot(coverage_values, risk_values)
+    plt.xlabel("Coverage")
+    plt.ylabel("Risk (error rate)")
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+    return {
+        "path": str(output_path),
+        "coverage_at_80pct": float(0.8),
+        "risk_at_80pct": float(risk_values[max(0, int(0.8 * len(risk_values)) - 1)]),
+    }
+
+
+def run_baseline_models(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+) -> Dict[str, Dict[str, Any]]:
+    models = {
+        "logistic_raw": LogisticRegression(
+            max_iter=2000, class_weight="balanced", random_state=42
+        ),
+        "random_forest": RandomForestClassifier(
+            n_estimators=400, class_weight="balanced", random_state=42
+        ),
+        "svm_rbf": SVC(probability=True, class_weight="balanced", random_state=42),
+    }
+    results = {}
+    for name, model in models.items():
+        model.fit(X_train, y_train)
+        y_prob = model.predict_proba(X_test)[:, 1]
+        results[name] = compute_binary_metrics(y_test, y_prob)
+    return results
+
+
+def repeated_cv_scoreboard(
+    X: np.ndarray,
+    y: np.ndarray,
+    repeats: int = 2,
+    folds: int = 5,
+) -> Dict[str, Any]:
+    rkf = RepeatedStratifiedKFold(n_splits=folds, n_repeats=repeats, random_state=42)
+    models = {
+        "logistic_raw": LogisticRegression(
+            max_iter=2000, class_weight="balanced", random_state=42
+        ),
+        "random_forest": RandomForestClassifier(
+            n_estimators=300, class_weight="balanced", random_state=42
+        ),
+        "svm_rbf": SVC(probability=True, class_weight="balanced", random_state=42),
+    }
+    storage: Dict[str, List[float]] = {k: [] for k in models.keys()}
+    for train_idx, test_idx in rkf.split(X, y):
+        X_tr, X_te = X[train_idx], X[test_idx]
+        y_tr, y_te = y[train_idx], y[test_idx]
+        for name, model in models.items():
+            model.fit(X_tr, y_tr)
+            prob = model.predict_proba(X_te)[:, 1]
+            auc_value = roc_auc_score(y_te, prob)
+            storage[name].append(float(np.asarray(auc_value).reshape(-1)[0]))
+    summary = {}
+    for name, values in storage.items():
+        summary[name] = {
+            "auc_mean": float(np.mean(values)),
+            "auc_std": float(np.std(values)),
+            "n_runs": len(values),
+        }
+    return summary
+
+
+def infer_expression_modality(feature_names: List[str]) -> Dict[str, Any]:
+    joined = " ".join([str(x).lower() for x in feature_names[:500]])
+    mirna_markers = ["mir", "hsa-mir", "microrna"]
+    mrna_markers = ["ensg", "nm_", "rna", "transcript"]
+    mirna_hits = sum([1 for m in mirna_markers if m in joined])
+    mrna_hits = sum([1 for m in mrna_markers if m in joined])
+    if mirna_hits > mrna_hits:
+        inferred = "likely_miRNA"
+    elif mrna_hits > mirna_hits:
+        inferred = "likely_mRNA_or_transcript"
+    else:
+        inferred = "unknown"
+    return {
+        "inferred_type": inferred,
+        "warning": "Heuristic inference only; verify modality from source documentation.",
+    }
+
+
+def evaluate_external_dataset(
+    rna_path: Path,
+    dna_path: Path,
+    cna_path: Path,
+    high_label_value: Optional[str],
+    feature_columns: Dict[str, List[str]],
+    preprocessors: Dict[str, Pipeline],
+    encoders: Dict[str, Model],
+    probability_model: Any,
+    train_mean: np.ndarray,
+    train_inv_cov: np.ndarray,
+    ood_threshold: float,
+    disagreement_models: List[LogisticRegression],
+) -> Dict[str, Any]:
+    external = load_and_align_multiomics(
+        rna_path=rna_path,
+        dna_path=dna_path,
+        cna_path=cna_path,
+        high_label_value=high_label_value,
+    )
+
+    missing_cols = {
+        "rna": [
+            c for c in feature_columns["rna"] if c not in external["X_rna"].columns
+        ],
+        "dna": [
+            c for c in feature_columns["dna"] if c not in external["X_dna"].columns
+        ],
+        "cna": [
+            c for c in feature_columns["cna"] if c not in external["X_cna"].columns
+        ],
+    }
+    if any(len(v) > 0 for v in missing_cols.values()):
+        return {
+            "status": "failed",
+            "reason": "External dataset columns do not match training features.",
+            "missing_columns": {k: v[:20] for k, v in missing_cols.items()},
+        }
+
+    X_rna_ext_df = external["X_rna"].loc[:, feature_columns["rna"]]
+    X_dna_ext_df = external["X_dna"].loc[:, feature_columns["dna"]]
+    X_cna_ext_df = external["X_cna"].loc[:, feature_columns["cna"]]
+    y_ext = external["y_binary"]
+
+    x_rna = preprocessors["rna"].transform(X_rna_ext_df)
+    x_dna = preprocessors["dna"].transform(X_dna_ext_df)
+    x_cna = preprocessors["cna"].transform(X_cna_ext_df)
+    latent_ext, _ = transform_latent(
+        encoders["rna"],
+        encoders["dna"],
+        encoders["cna"],
+        x_rna,
+        x_dna,
+        x_cna,
+    )
+    y_prob_ext = probability_model.predict_proba(latent_ext)[:, 1]
+    metrics = compute_binary_metrics(y_ext, y_prob_ext)
+    metrics["ece"] = expected_calibration_error(y_ext, y_prob_ext)
+
+    rel_items = []
+    for i in range(len(y_ext)):
+        rel_items.append(
+            reliability_assessment(
+                prob_high_tmb=float(y_prob_ext[i]),
+                data_completeness=compute_data_completeness(
+                    X_rna_ext_df.iloc[[i]],
+                    X_dna_ext_df.iloc[[i]],
+                    X_cna_ext_df.iloc[[i]],
+                ),
+                latent_vector=latent_ext[i],
+                train_mean=train_mean,
+                train_inv_cov=train_inv_cov,
+                ood_threshold=ood_threshold,
+                disagreement_models=disagreement_models,
+            )
+        )
+
+    return {
+        "status": "ok",
+        "n_samples": int(len(y_ext)),
+        "metrics": metrics,
+        "reliability_separation": evaluate_reliability_separation(
+            y_true=y_ext,
+            y_prob=y_prob_ext,
+            reliability_items=rel_items,
+        ),
+    }
+
+
+def run_optional_boosting_baselines(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+) -> Dict[str, Any]:
+    results: Dict[str, Any] = {}
+    try:
+        import importlib
+
+        xgb_module_name = "xgboost"
+        xgb = importlib.import_module(xgb_module_name)
+
+        xgb_model = xgb.XGBClassifier(
+            n_estimators=300,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            objective="binary:logistic",
+            eval_metric="logloss",
+            random_state=42,
+        )
+        xgb_model.fit(X_train, y_train)
+        xgb_pred = xgb_model.predict_proba(X_test)
+        xgb_prob = np.asarray(xgb_pred).reshape(len(y_test), -1)[:, 1]
+        results["xgboost"] = compute_binary_metrics(y_test, xgb_prob)
+    except Exception as e:
+        results["xgboost"] = {"status": "unavailable", "reason": str(e)}
+
+    try:
+        import lightgbm as lgb
+
+        lgb_model = lgb.LGBMClassifier(
+            n_estimators=300,
+            learning_rate=0.05,
+            random_state=42,
+            verbosity=-1,
+        )
+        lgb_model.fit(X_train, y_train)
+        lgb_pred = lgb_model.predict_proba(X_test)
+        lgb_prob = np.asarray(lgb_pred).reshape(len(y_test), -1)[:, 1]
+        results["lightgbm"] = compute_binary_metrics(y_test, lgb_prob)
+    except Exception as e:
+        results["lightgbm"] = {"status": "unavailable", "reason": str(e)}
+
+    return results
+
+
+def train_latent_neural_baseline(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+) -> Model:
+    inputs = Input(shape=(X_train.shape[1],))
+    x = Dense(64, activation="relu")(inputs)
+    x = Dense(32, activation="relu")(x)
+    outputs = Dense(1, activation="sigmoid")(x)
+    model = Model(inputs=inputs, outputs=outputs)
+    model.compile(optimizer="adam", loss="binary_crossentropy")
+    early_stop = EarlyStopping(
+        monitor="val_loss", patience=8, restore_best_weights=True
+    )
+    model.fit(
+        X_train,
+        y_train,
+        validation_data=(X_val, y_val),
+        epochs=120,
+        batch_size=32,
+        callbacks=[early_stop],
+        verbose=0,
+    )
+    return model
+
+
+def nested_cv_latent_benchmark(X: np.ndarray, y: np.ndarray) -> Dict[str, Any]:
+    outer_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    model_grids = {
+        "logistic": (
+            LogisticRegression(max_iter=4000, class_weight="balanced", random_state=42),
+            {"C": [0.1, 1.0, 5.0]},
+        ),
+        "svm_rbf": (
+            SVC(probability=True, class_weight="balanced", random_state=42),
+            {"C": [0.5, 1.0, 2.0], "gamma": ["scale", "auto"]},
+        ),
+        "random_forest": (
+            RandomForestClassifier(class_weight="balanced", random_state=42),
+            {"n_estimators": [200, 400], "max_depth": [None, 8]},
+        ),
+        "mlp": (
+            MLPClassifier(max_iter=300, random_state=42),
+            {"hidden_layer_sizes": [(64,), (64, 32)], "alpha": [1e-4, 1e-3]},
+        ),
+    }
+    results: Dict[str, List[float]] = {k: [] for k in model_grids.keys()}
+    for train_idx, test_idx in outer_cv.split(X, y):
+        X_tr, X_te = X[train_idx], X[test_idx]
+        y_tr, y_te = y[train_idx], y[test_idx]
+        inner_cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+        for name, (estimator, grid) in model_grids.items():
+            gs = GridSearchCV(
+                estimator=estimator,
+                param_grid=grid,
+                scoring="roc_auc",
+                cv=inner_cv,
+                n_jobs=-1,
+            )
+            gs.fit(X_tr, y_tr)
+            prob = gs.best_estimator_.predict_proba(X_te)[:, 1]
+            results[name].append(float(roc_auc_score(y_te, prob)))
+    summary = {}
+    for name, values in results.items():
+        summary[name] = {
+            "auc_mean": float(np.mean(values)),
+            "auc_std": float(np.std(values)),
+            "n_outer_folds": len(values),
+        }
+    return summary
+
+
+def evaluate_reliability_separation(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    reliability_items: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    y_pred = (y_prob >= 0.5).astype(int)
+    errors = (y_pred != y_true).astype(int)
+    reliable_idx = np.array(
+        [r["reliability_status"] == "Reliable" for r in reliability_items]
+    )
+    caution_idx = np.array(
+        [r["reliability_status"] == "Caution" for r in reliability_items]
+    )
+    inconclusive_idx = np.array([r["is_inconclusive"] for r in reliability_items])
+
+    def _safe_rate(mask: np.ndarray) -> Optional[float]:
+        if np.sum(mask) == 0:
+            return None
+        return float(np.mean(errors[mask]))
+
+    return {
+        "error_rate_reliable": _safe_rate(reliable_idx),
+        "error_rate_caution": _safe_rate(caution_idx),
+        "error_rate_inconclusive": _safe_rate(inconclusive_idx),
+        "coverage_reliable": float(np.mean(reliable_idx)),
+        "coverage_caution": float(np.mean(caution_idx)),
+        "coverage_inconclusive": float(np.mean(inconclusive_idx)),
+    }
+
+
+def reliability_ablation(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    reliability_items: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    checks = {
+        "borderline_confidence": lambda r: r["is_inconclusive"],
+        "missingness": lambda r: r["data_quality_warning"] != "none",
+        "ood": lambda r: r["out_of_distribution_risk"] in {"moderate", "high"},
+        "disagreement": lambda r: r["model_disagreement_flag"],
+    }
+    y_pred = (y_prob >= 0.5).astype(int)
+    errors = (y_pred != y_true).astype(int)
+    output = {}
+    for name, rule in checks.items():
+        mask = np.array([rule(r) for r in reliability_items])
+        if np.sum(mask) == 0:
+            output[name] = {
+                "flagged_count": 0,
+                "error_rate_flagged": None,
+                "error_rate_unflagged": None,
+            }
+            continue
+        output[name] = {
+            "flagged_count": int(np.sum(mask)),
+            "error_rate_flagged": float(np.mean(errors[mask])),
+            "error_rate_unflagged": float(np.mean(errors[~mask]))
+            if np.sum(~mask) > 0
+            else None,
+        }
+    return output
+
+
+def missingness_stress_test(
+    pre_rna: Pipeline,
+    pre_dna: Pipeline,
+    pre_cna: Pipeline,
+    encoder_rna: Model,
+    encoder_dna: Model,
+    encoder_cna: Model,
+    classifier: LogisticRegression,
+    X_rna_test_df: pd.DataFrame,
+    X_dna_test_df: pd.DataFrame,
+    X_cna_test_df: pd.DataFrame,
+    y_test: np.ndarray,
+) -> Dict[str, Any]:
+    fractions = [0.0, 0.05, 0.1, 0.2, 0.3]
+    rows = []
+    rng = np.random.default_rng(42)
+    for frac in fractions:
+        rna_masked = X_rna_test_df.copy()
+        dna_masked = X_dna_test_df.copy()
+        cna_masked = X_cna_test_df.copy()
+        if frac > 0:
+            for df in [rna_masked, dna_masked, cna_masked]:
+                mask = rng.random(df.shape) < frac
+                df.values[mask] = np.nan
+        x_rna = pre_rna.transform(rna_masked)
+        x_dna = pre_dna.transform(dna_masked)
+        x_cna = pre_cna.transform(cna_masked)
+        latent, _ = transform_latent(
+            encoder_rna, encoder_dna, encoder_cna, x_rna, x_dna, x_cna
+        )
+        prob = classifier.predict_proba(latent)[:, 1]
+        rows.append(
+            {
+                "mask_fraction": frac,
+                "accuracy": float(accuracy_score(y_test, (prob >= 0.5).astype(int))),
+                "auc_roc": float(roc_auc_score(y_test, prob)),
+            }
+        )
+    return {"rows": rows}
+
+
+def ood_stress_test(
+    classifier: LogisticRegression,
+    X_latent_test: np.ndarray,
+    y_test: np.ndarray,
+) -> Dict[str, Any]:
+    strengths = [0.0, 0.2, 0.5, 0.8, 1.0]
+    rng = np.random.default_rng(42)
+    rows = []
+    for strength in strengths:
+        noisy = X_latent_test + rng.normal(0.0, strength, size=X_latent_test.shape)
+        prob = classifier.predict_proba(noisy)[:, 1]
+        rows.append(
+            {
+                "noise_std": strength,
+                "accuracy": float(accuracy_score(y_test, (prob >= 0.5).astype(int))),
+                "auc_roc": float(roc_auc_score(y_test, prob)),
+            }
+        )
+    return {"rows": rows}
+
+
+def explainer_stability(
+    X_gene_train: np.ndarray,
+    y_train: np.ndarray,
+    gene_feature_names: List[str],
+    top_k: int = 20,
+    n_runs: int = 8,
+) -> Dict[str, Any]:
+    top_sets = []
+    for seed in range(n_runs):
+        explainer = train_gene_explainer(X_gene_train, y_train, random_state=42 + seed)
+        coef = np.abs(explainer.coef_.reshape(-1))
+        top_idx = np.argsort(coef)[-top_k:]
+        top_sets.append(set([gene_feature_names[int(i)] for i in top_idx]))
+
+    jaccards = []
+    for i in range(len(top_sets)):
+        for j in range(i + 1, len(top_sets)):
+            inter = len(top_sets[i].intersection(top_sets[j]))
+            union = len(top_sets[i].union(top_sets[j]))
+            jaccards.append(inter / union if union > 0 else 0.0)
+
+    counts: Dict[str, int] = {}
+    for s in top_sets:
+        for name in s:
+            counts[name] = counts.get(name, 0) + 1
+    stable_top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
+
+    return {
+        "top_k": top_k,
+        "n_runs": n_runs,
+        "mean_jaccard": float(np.mean(jaccards)) if jaccards else None,
+        "std_jaccard": float(np.std(jaccards)) if jaccards else None,
+        "most_frequent_features": [
+            {"feature": name, "count": int(cnt)} for name, cnt in stable_top
+        ],
+    }
+
+
+def write_research_markdown(report: Dict[str, Any], output_path: Path) -> None:
+    metrics = report.get("proposed_model_metrics", {})
+    rel_sep = report.get("reliability_separation", {})
+    lines = [
+        "# OncoAssist Research Evaluation",
+        "",
+        "## Proposed Model",
+        f"- Raw AUC: {metrics.get('raw', {}).get('auc_roc')}",
+        f"- Calibrated AUC: {metrics.get('calibrated', {}).get('auc_roc')}",
+        f"- Calibrated Brier: {metrics.get('calibrated', {}).get('brier_score')}",
+        f"- Calibrated ECE: {metrics.get('calibrated', {}).get('ece')}",
+        "",
+        "## Reliability Separation",
+        f"- Error rate (Reliable): {rel_sep.get('error_rate_reliable')}",
+        f"- Error rate (Caution): {rel_sep.get('error_rate_caution')}",
+        f"- Coverage (Reliable): {rel_sep.get('coverage_reliable')}",
+        f"- Coverage (Inconclusive): {rel_sep.get('coverage_inconclusive')}",
+        "",
+        "## Notes",
+        "- CTGAN usage is tracked in selected_augmentation. Do not claim CTGAN unless source is 'ctgan'.",
+        "- Expression modality inference is heuristic only; verify with data dictionary.",
+        "- Auxiliary feature explainer does not claim biomarker validation.",
+        f"- Label semantics verified by user: {report.get('limitations', {}).get('label_semantics_verified')}",
+        f"- External validation executed: {report.get('limitations', {}).get('external_dataset_evaluated')}",
+    ]
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def build_clinical_output(
     prob_high_tmb: float,
     explanation: Dict[str, Any],
@@ -862,7 +1488,8 @@ def build_report_from_loaded_bundle(
     latent_vector = latent[0]
 
     classifier = loaded_bundle["classifier"]
-    prob_high = float(classifier.predict_proba(latent)[0, 1])
+    prob_model = loaded_bundle.get("probability_model", classifier)
+    prob_high = float(prob_model.predict_proba(latent)[0, 1])
 
     explanation = explain_latent_prediction(
         latent_vector=latent_vector,
@@ -994,13 +1621,38 @@ def load_export_bundle(export_dir: Path) -> Dict[str, Any]:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--high-label",
+        type=str,
+        default=None,
+        help="Optional CLASS label value that should map to High-TMB.",
+    )
+    parser.add_argument(
+        "--strict-label-verification",
+        action="store_true",
+        help="Require explicit --high-label to avoid ordered-label assumption.",
+    )
+    parser.add_argument("--external-rna", type=str, default=None)
+    parser.add_argument("--external-dna", type=str, default=None)
+    parser.add_argument("--external-cna", type=str, default=None)
+    args = parser.parse_args()
+
+    if args.strict_label_verification and args.high_label is None:
+        raise ValueError(
+            "Strict label verification enabled. Please provide --high-label explicitly."
+        )
+
     base_dir = Path(__file__).resolve().parent
     rna_path = base_dir / "mGE (1).csv"
     dna_path = base_dir / "mDM (1).csv"
     cna_path = base_dir / "mCNA (1).csv"
 
     data = load_and_align_multiomics(
-        rna_path=rna_path, dna_path=dna_path, cna_path=cna_path
+        rna_path=rna_path,
+        dna_path=dna_path,
+        cna_path=cna_path,
+        high_label_value=args.high_label,
     )
 
     X_rna = data["X_rna"]
@@ -1071,27 +1723,95 @@ def main() -> None:
         encoder_rna, encoder_dna, encoder_cna, X_rna_test, X_dna_test, X_cna_test
     )
 
-    X_train_aug, y_train_aug, aug_info = augment_minority_class(X_latent_train, y_train)
+    augmentation_experiments: Dict[str, Any] = {}
+    for mode in ["none", "bootstrap", "ctgan_or_bootstrap"]:
+        mode_X_aug, mode_y_aug, mode_info = augment_minority_class(
+            X_latent_train,
+            y_train,
+            mode=mode,
+        )
+        mode_clf = LogisticRegression(
+            max_iter=2000,
+            class_weight="balanced",
+            random_state=42,
+        )
+        mode_clf.fit(mode_X_aug, mode_y_aug)
+        mode_prob = mode_clf.predict_proba(X_latent_test)[:, 1]
+        augmentation_experiments[mode] = {
+            "metrics": compute_binary_metrics(y_test, mode_prob),
+            "ece": expected_calibration_error(y_test, mode_prob),
+            "augmentation_info": mode_info,
+        }
+
+    X_train_aug, y_train_aug, aug_info = augment_minority_class(
+        X_latent_train,
+        y_train,
+        mode="ctgan_or_bootstrap",
+    )
 
     classifier = LogisticRegression(
         max_iter=2000, class_weight="balanced", random_state=42
     )
     classifier.fit(X_train_aug, y_train_aug)
+    probability_model = CalibratedClassifierCV(
+        estimator=LogisticRegression(
+            max_iter=2000,
+            class_weight="balanced",
+            random_state=42,
+        ),
+        method="isotonic",
+        cv=5,
+    )
+    probability_model.fit(X_train_aug, y_train_aug)
 
     disagreement_models = train_disagreement_ensemble(
         X_train_aug, y_train_aug, n_models=5
     )
 
-    y_test_prob = classifier.predict_proba(X_latent_test)[:, 1]
-    y_test_pred = (y_test_prob >= 0.5).astype(int)
+    y_test_prob_raw = classifier.predict_proba(X_latent_test)[:, 1]
+    y_test_prob = probability_model.predict_proba(X_latent_test)[:, 1]
 
     metrics = {
-        "accuracy": float(accuracy_score(y_test, y_test_pred)),
-        "auc_roc": float(roc_auc_score(y_test, y_test_prob)),
-        "classification_report": classification_report(
-            y_test, y_test_pred, output_dict=True
-        ),
+        "raw": {
+            **compute_binary_metrics(y_test, y_test_prob_raw),
+            "ece": expected_calibration_error(y_test, y_test_prob_raw),
+        },
+        "calibrated": {
+            **compute_binary_metrics(y_test, y_test_prob),
+            "ece": expected_calibration_error(y_test, y_test_prob),
+        },
     }
+
+    baseline_results = run_baseline_models(X_gene_train, y_train, X_gene_test, y_test)
+    optional_boosting_results = run_optional_boosting_baselines(
+        X_gene_train,
+        y_train,
+        X_gene_test,
+        y_test,
+    )
+
+    nn_train_idx, nn_val_idx = train_test_split(
+        np.arange(len(y_train)), test_size=0.2, random_state=42, stratify=y_train
+    )
+    latent_nn = train_latent_neural_baseline(
+        X_train=X_latent_train[nn_train_idx],
+        y_train=y_train[nn_train_idx],
+        X_val=X_latent_train[nn_val_idx],
+        y_val=y_train[nn_val_idx],
+    )
+    nn_prob = latent_nn.predict(X_latent_test, verbose=0).reshape(-1)
+    neural_baseline = compute_binary_metrics(y_test, nn_prob)
+
+    cv_scoreboard = repeated_cv_scoreboard(
+        X=np.concatenate([X_gene_train, X_gene_test], axis=0),
+        y=np.concatenate([y_train, y_test], axis=0),
+        repeats=2,
+        folds=5,
+    )
+    nested_cv_latent = nested_cv_latent_benchmark(
+        X=np.concatenate([X_latent_train, X_latent_test], axis=0),
+        y=np.concatenate([y_train, y_test], axis=0),
+    )
 
     # OOD statistics from training latent distribution
     cov = np.cov(X_latent_train.T)
@@ -1103,17 +1823,119 @@ def main() -> None:
     )
     ood_threshold = float(np.quantile(train_distances, 0.95))
 
+    reliability_items: List[Dict[str, Any]] = []
+    for i in range(len(y_test)):
+        completeness_i = compute_data_completeness(
+            X_rna_test_df.iloc[[i]],
+            X_dna_test_df.iloc[[i]],
+            X_cna_test_df.iloc[[i]],
+        )
+        rel_i = reliability_assessment(
+            prob_high_tmb=float(y_test_prob[i]),
+            data_completeness=completeness_i,
+            latent_vector=X_latent_test[i],
+            train_mean=train_mean,
+            train_inv_cov=train_inv_cov,
+            ood_threshold=ood_threshold,
+            disagreement_models=disagreement_models,
+        )
+        reliability_items.append(rel_i)
+
+    reliability_separation = evaluate_reliability_separation(
+        y_true=y_test,
+        y_prob=y_test_prob,
+        reliability_items=reliability_items,
+    )
+    reliability_component_ablation = reliability_ablation(
+        y_true=y_test,
+        y_prob=y_test_prob,
+        reliability_items=reliability_items,
+    )
+
+    export_dir = base_dir / "export_artifacts"
+    research_dir = export_dir / "research_outputs"
+    research_dir.mkdir(parents=True, exist_ok=True)
+
+    reliability_plot_raw = plot_reliability_diagram(
+        y_true=y_test,
+        y_prob=y_test_prob_raw,
+        output_path=research_dir / "reliability_diagram_raw.png",
+        title="Reliability Diagram (Raw)",
+    )
+    reliability_plot_calibrated = plot_reliability_diagram(
+        y_true=y_test,
+        y_prob=y_test_prob,
+        output_path=research_dir / "reliability_diagram_calibrated.png",
+        title="Reliability Diagram (Calibrated)",
+    )
+    coverage_risk_curve = plot_coverage_risk_curve(
+        y_true=y_test,
+        y_prob=y_test_prob,
+        output_path=research_dir / "coverage_risk_curve.png",
+        title="Selective Prediction Coverage-Risk",
+    )
+
+    missingness_results = missingness_stress_test(
+        pre_rna=pre_rna,
+        pre_dna=pre_dna,
+        pre_cna=pre_cna,
+        encoder_rna=encoder_rna,
+        encoder_dna=encoder_dna,
+        encoder_cna=encoder_cna,
+        classifier=classifier,
+        X_rna_test_df=X_rna_test_df,
+        X_dna_test_df=X_dna_test_df,
+        X_cna_test_df=X_cna_test_df,
+        y_test=y_test,
+    )
+    ood_results = ood_stress_test(
+        classifier=classifier,
+        X_latent_test=X_latent_test,
+        y_test=y_test,
+    )
+
+    explainer_stability_results = explainer_stability(
+        X_gene_train=X_gene_train,
+        y_train=y_train,
+        gene_feature_names=gene_feature_names,
+        top_k=20,
+        n_runs=8,
+    )
+
+    pd.DataFrame(missingness_results["rows"]).to_csv(
+        research_dir / "missingness_stress.csv", index=False
+    )
+    pd.DataFrame(ood_results["rows"]).to_csv(
+        research_dir / "ood_stress.csv", index=False
+    )
+
+    external_validation: Dict[str, Any]
+    if args.external_rna and args.external_dna and args.external_cna:
+        external_validation = evaluate_external_dataset(
+            rna_path=Path(args.external_rna),
+            dna_path=Path(args.external_dna),
+            cna_path=Path(args.external_cna),
+            high_label_value=args.high_label,
+            feature_columns=data["feature_columns"],
+            preprocessors={"rna": pre_rna, "dna": pre_dna, "cna": pre_cna},
+            encoders={"rna": encoder_rna, "dna": encoder_dna, "cna": encoder_cna},
+            probability_model=probability_model,
+            train_mean=train_mean,
+            train_inv_cov=train_inv_cov,
+            ood_threshold=ood_threshold,
+            disagreement_models=disagreement_models,
+        )
+    else:
+        external_validation = {
+            "status": "not_provided",
+            "reason": "No external dataset paths provided.",
+        }
+
     # Use first held-out sample as demonstration for block-by-block outputs
     demo_idx = 0
     demo_prob = float(y_test_prob[demo_idx])
     demo_latent = X_latent_test[demo_idx]
     demo_gene_vector = X_gene_test[demo_idx]
-
-    demo_completeness = compute_data_completeness(
-        X_rna_test_df.iloc[[demo_idx]],
-        X_dna_test_df.iloc[[demo_idx]],
-        X_cna_test_df.iloc[[demo_idx]],
-    )
 
     explanation = explain_latent_prediction(
         latent_vector=demo_latent,
@@ -1131,15 +1953,7 @@ def main() -> None:
         top_k=5,
     )
 
-    reliability = reliability_assessment(
-        prob_high_tmb=demo_prob,
-        data_completeness=demo_completeness,
-        latent_vector=demo_latent,
-        train_mean=train_mean,
-        train_inv_cov=train_inv_cov,
-        ood_threshold=ood_threshold,
-        disagreement_models=disagreement_models,
-    )
+    reliability = reliability_items[demo_idx]
 
     clinical_output = build_clinical_output(
         prob_high_tmb=demo_prob,
@@ -1148,7 +1962,40 @@ def main() -> None:
         gene_explanation=gene_explanation,
     )
 
-    export_dir = base_dir / "export_artifacts"
+    research_report = {
+        "label_mapping": data["label_mapping"],
+        "expression_modality_inference": infer_expression_modality(
+            data["feature_columns"]["rna"]
+        ),
+        "augmentation_experiments": augmentation_experiments,
+        "selected_augmentation": aug_info,
+        "proposed_model_metrics": metrics,
+        "latent_neural_baseline": neural_baseline,
+        "baseline_holdout_metrics": baseline_results,
+        "optional_boosting_baselines": optional_boosting_results,
+        "repeated_cv_baselines": cv_scoreboard,
+        "nested_cv_latent_benchmark": nested_cv_latent,
+        "reliability_separation": reliability_separation,
+        "reliability_component_ablation": reliability_component_ablation,
+        "reliability_diagram_raw": reliability_plot_raw,
+        "reliability_diagram_calibrated": reliability_plot_calibrated,
+        "coverage_risk_curve": coverage_risk_curve,
+        "missingness_stress_test": missingness_results,
+        "ood_stress_test": ood_results,
+        "explainer_stability": explainer_stability_results,
+        "external_validation": external_validation,
+        "limitations": {
+            "label_semantics_verified": data["label_mapping"].get("assumption_mode")
+            == "user_provided_high_label",
+            "ctgan_confirmed": aug_info.get("augmentation_source") == "ctgan",
+            "external_dataset_evaluated": external_validation.get("status") == "ok",
+        },
+    }
+
+    with (research_dir / "research_report.json").open("w", encoding="utf-8") as f:
+        json.dump(research_report, f, indent=2)
+    write_research_markdown(research_report, research_dir / "research_report.md")
+
     export_paths = save_export_bundle(
         export_dir=export_dir,
         encoder_rna=encoder_rna,
@@ -1157,6 +2004,7 @@ def main() -> None:
         payload={
             "preprocessors": {"rna": pre_rna, "dna": pre_dna, "cna": pre_cna},
             "classifier": classifier,
+            "probability_model": probability_model,
             "gene_explainer_model": gene_explainer_model,
             "gene_feature_names": gene_feature_names,
             "disagreement_models": disagreement_models,
@@ -1181,6 +2029,7 @@ def main() -> None:
             },
             "augmentation_info": aug_info,
             "training_metrics": metrics,
+            "research_report": research_report,
             "demo_output": clinical_output,
         },
     )
@@ -1197,7 +2046,22 @@ def main() -> None:
     )
 
     print("=== TRAINING / EVAL SUMMARY ===")
-    print(json.dumps({"metrics": metrics, "augmentation_info": aug_info}, indent=2))
+    print(
+        json.dumps(
+            {
+                "metrics": metrics,
+                "augmentation_info": aug_info,
+                "baseline_holdout": baseline_results,
+                "boosting_baselines": optional_boosting_results,
+                "latent_neural_baseline": neural_baseline,
+                "cv_baselines": cv_scoreboard,
+                "nested_cv_latent": nested_cv_latent,
+                "reliability_separation": reliability_separation,
+                "report_json": str(research_dir / "research_report.json"),
+            },
+            indent=2,
+        )
+    )
 
     print("\n=== AFTER EXPLAINABILITY BLOCK ===")
     print(json.dumps(explanation, indent=2))
