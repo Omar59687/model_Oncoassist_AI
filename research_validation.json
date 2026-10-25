@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "scope": "existing_saved_results",
+  "review_date": "2026-10-25",
+  "source_revisions": {
+    "implementation": "10260e404a447e77f440288886101cf4db6fb6af",
+    "published_dataset": "0b55bfa24b608660562069802e12340370899b2b",
+    "paper_doi": "10.3390/a19020095"
+  },
+  "label_semantics": {
+    "status": "unverified",
+    "codes_present": [
+      "1",
+      "2"
+    ],
+    "current_implementation_assumption": {
+      "1": "Low-TMB",
+      "2": "High-TMB"
+    },
+    "evidence_needed": [
+      "per-sample TMB values",
+      "TMB cutoff and derivation",
+      "numeric CLASS code mapping from data producer"
+    ]
+  },
+  "cohort_discrepancy": {
+    "status": "unresolved",
+    "released_omics_samples_each": 404,
+    "shared_unique_ids": 404,
+    "released_class_counts": {
+      "1": 297,
+      "2": 107
+    },
+    "paper_blca_counts": {
+      "Low-TMB": 97,
+      "High-TMB": 107
+    },
+    "difference_total": 200,
+    "evidence_needed": [
+      "paper inclusion/exclusion manifest",
+      "sample IDs used for Table 2",
+      "filtering/preprocessing script"
+    ]
+  },
+  "feature_selection": {
+    "status": "timing_unverified",
+    "paper_supervised_method": "between-class t-test, fold-change and BH FDR 0.01",
+    "released_feature_counts": {
+      "mGE": 23,
+      "mDM": 42,
+      "mCNA": 14
+    },
+    "selection_code_in_published_repository": false,
+    "full_dataset_selection_leakage": "possible_unverified",
+    "published_notebook_class_in_autoencoder_inputs": "confirmed",
+    "current_implementation_class_in_features": false,
+    "evidence_needed": [
+      "raw feature matrices",
+      "feature selection implementation",
+      "train/test or fold sample manifests"
+    ]
+  },
+  "evaluation_limitations": {
+    "repeat_cv_preprocessing_outside_folds": true,
+    "nested_cv_encoder_outside_folds": true,
+    "augmentation_modes_compared_on_held_out_test": true,
+    "calibration_fitted_on_augmented_resamples": true,
+    "external_validation_status": "not_provided",
+    "existing_metrics_use": "exploratory_only"
+  },
+  "augmentation_observed": {
+    "selected_source": "bootstrap_fallback",
+    "ctgan_attempted": true,
+    "ctgan_succeeded": false,
+    "recorded_error_type": "AssertionError"
+  },
+  "provenance": [
+    {
+      "kind": "source_data",
+      "url": "https://github.com/Ibrahimalhurani/Dataset_and_Code/tree/0b55bfa24b608660562069802e12340370899b2b",
+      "files": [
+        "mGE.csv",
+        "mDM.csv",
+        "mCNA.csv"
+      ],
+      "method": "in-memory full-content comparison after line-ending normalization"
+    },
+    {
+      "kind": "published_code",
+      "url": "https://github.com/Ibrahimalhurani/Dataset_and_Code/blob/0b55bfa24b608660562069802e12340370899b2b/AE_CTGAN_BLCA.ipynb",
+      "cells": [
+        2,
+        3,
+        9
+      ]
+    },
+    {
+      "kind": "paper",
+      "url": "https://doi.org/10.3390/a19020095",
+      "sections": [
+        "3.2",
+        "Table 2"
+      ]
+    },
+    {
+      "kind": "implementation",
+      "url": "https://github.com/Omar59687/model_Oncoassist_AI/blob/10260e404a447e77f440288886101cf4db6fb6af/oncoassist_competition_ready.py"
+    },
+    {
+      "kind": "saved_report",
+      "url": "https://github.com/Omar59687/model_Oncoassist_AI/blob/10260e404a447e77f440288886101cf4db6fb6af/export_artifacts/research_outputs/research_report.json"
+    }
+  ]
+}
