@@ -1,0 +1,267 @@
+{
+  "checkpoint": "2B",
+  "scope": "conditional on released preselected features; not end-to-end leakage-free",
+  "label_semantics": "unverified; positive means CLASS code 2 only",
+  "heldout": {
+    "recovery_method": "main.py train_test_split on sorted shared IDs; seed=42, stratify=ordered binary CLASS, test_size=0.2",
+    "excluded_count": 81,
+    "excluded_id_sha256": "669f6df537a7704a9e130f32a4cb116f7dbe14f5940963fc65c093145e5945d0",
+    "used_for_cv": false
+  },
+  "training_pool_count": 323,
+  "training_pool_support": {
+    "1": 237,
+    "2": 86
+  },
+  "architecture": {
+    "modalities": [
+      "mGE",
+      "mDM",
+      "mCNA"
+    ],
+    "encoder_per_modality_per_fold": true,
+    "hidden_units": "max(32, input_dim), latent_dim, max(32, input_dim)",
+    "activations": [
+      "relu",
+      "linear",
+      "relu",
+      "linear"
+    ],
+    "latent_capacities": {
+      "mGE": 16,
+      "mDM": 16,
+      "mCNA": 8
+    },
+    "reconstruction_loss": "mse",
+    "optimizer": "adam",
+    "epochs_max": 100,
+    "early_stopping_patience": 10,
+    "batch_size": 32,
+    "early_stop_fraction_of_outer_training": 0.2,
+    "classifier": "LogisticRegression(max_iter=2000, class_weight=balanced)",
+    "augmentation": null,
+    "calibration": null,
+    "deviation_from_main": "Encoders and preprocessors fitted independently inside every outer CV fold; early-stop split inside that fold"
+  },
+  "cross_validation": {
+    "type": "StratifiedKFold",
+    "folds": 5,
+    "shuffle": true,
+    "random_state": 42,
+    "same_splits_as_checkpoint_2a": true
+  },
+  "reproducibility": {
+    "base_seed": 42,
+    "encoder_seed_rule": "42 + 100*fold_number + modality_index",
+    "tf_op_determinism": "TensorFlow op determinism requested",
+    "environment": {
+      "TF_ENABLE_ONEDNN_OPTS": "0",
+      "TF_NUM_INTRAOP_THREADS": "2",
+      "TF_NUM_INTEROP_THREADS": "2"
+    },
+    "remaining_limit": "Numerical results can vary across TensorFlow, hardware, and thread implementations"
+  },
+  "library_versions": {
+    "python": "3.12.14",
+    "numpy": "2.3.5",
+    "pandas": "2.2.3",
+    "scikit_learn": "1.8.0",
+    "tensorflow": "2.21.0"
+  },
+  "models": {
+    "latent_logistic_regression": {
+      "out_of_fold": {
+        "accuracy": 0.7368421052631579,
+        "positive_class_code": "2",
+        "positive_class": {
+          "precision": 0.5045045045045045,
+          "recall": 0.6511627906976745,
+          "f1": 0.5685279187817259
+        },
+        "macro": {
+          "precision": 0.6814975352711201,
+          "recall": 0.7095476400745756,
+          "f1": 0.6896091709721548
+        },
+        "confusion_matrix": [
+          [
+            182,
+            55
+          ],
+          [
+            30,
+            56
+          ]
+        ],
+        "class_support": {
+          "1": 237,
+          "2": 86
+        }
+      },
+      "roc_auc_mean_across_folds": 0.7848804060631345,
+      "roc_auc_std_across_folds": 0.025709692563621777,
+      "folds": [
+        {
+          "fold": 1,
+          "train_count": 258,
+          "validation_count": 65,
+          "roc_auc": 0.7843137254901961,
+          "accuracy": 0.7384615384615385,
+          "positive_class_code": "2",
+          "positive_class": {
+            "precision": 0.5,
+            "recall": 0.6470588235294118,
+            "f1": 0.5641025641025641
+          },
+          "macro": {
+            "precision": 0.6802325581395349,
+            "recall": 0.7089460784313726,
+            "f1": 0.6886446886446886
+          },
+          "confusion_matrix": [
+            [
+              37,
+              11
+            ],
+            [
+              6,
+              11
+            ]
+          ],
+          "class_support": {
+            "1": 48,
+            "2": 17
+          }
+        },
+        {
+          "fold": 2,
+          "train_count": 258,
+          "validation_count": 65,
+          "roc_auc": 0.7426470588235294,
+          "accuracy": 0.7384615384615385,
+          "positive_class_code": "2",
+          "positive_class": {
+            "precision": 0.5,
+            "recall": 0.7647058823529411,
+            "f1": 0.6046511627906976
+          },
+          "macro": {
+            "precision": 0.6987179487179487,
+            "recall": 0.7469362745098038,
+            "f1": 0.7046244319700614
+          },
+          "confusion_matrix": [
+            [
+              35,
+              13
+            ],
+            [
+              4,
+              13
+            ]
+          ],
+          "class_support": {
+            "1": 48,
+            "2": 17
+          }
+        },
+        {
+          "fold": 3,
+          "train_count": 258,
+          "validation_count": 65,
+          "roc_auc": 0.8179669030732861,
+          "accuracy": 0.7230769230769231,
+          "positive_class_code": "2",
+          "positive_class": {
+            "precision": 0.5,
+            "recall": 0.6666666666666666,
+            "f1": 0.5714285714285714
+          },
+          "macro": {
+            "precision": 0.6768292682926829,
+            "recall": 0.7056737588652482,
+            "f1": 0.6834415584415584
+          },
+          "confusion_matrix": [
+            [
+              35,
+              12
+            ],
+            [
+              6,
+              12
+            ]
+          ],
+          "class_support": {
+            "1": 47,
+            "2": 18
+          }
+        },
+        {
+          "fold": 4,
+          "train_count": 259,
+          "validation_count": 64,
+          "roc_auc": 0.7759699624530663,
+          "accuracy": 0.75,
+          "positive_class_code": "2",
+          "positive_class": {
+            "precision": 0.5333333333333333,
+            "recall": 0.47058823529411764,
+            "f1": 0.5
+          },
+          "macro": {
+            "precision": 0.6748299319727891,
+            "recall": 0.6608260325406758,
+            "f1": 0.6666666666666667
+          },
+          "confusion_matrix": [
+            [
+              40,
+              7
+            ],
+            [
+              9,
+              8
+            ]
+          ],
+          "class_support": {
+            "1": 47,
+            "2": 17
+          }
+        },
+        {
+          "fold": 5,
+          "train_count": 259,
+          "validation_count": 64,
+          "roc_auc": 0.8035043804755945,
+          "accuracy": 0.734375,
+          "positive_class_code": "2",
+          "positive_class": {
+            "precision": 0.5,
+            "recall": 0.7058823529411765,
+            "f1": 0.5853658536585366
+          },
+          "macro": {
+            "precision": 0.6875,
+            "recall": 0.7252816020025031,
+            "f1": 0.6949817774039809
+          },
+          "confusion_matrix": [
+            [
+              35,
+              12
+            ],
+            [
+              5,
+              12
+            ]
+          ],
+          "class_support": {
+            "1": 47,
+            "2": 17
+          }
+        }
+      ]
+    }
+  }
+}
