@@ -1,0 +1,99 @@
+{
+  "checkpoint": "3A",
+  "status": "smoke_succeeded",
+  "mode": "smoke",
+  "scope": "conditional on released preselected features; no verified clinical label semantics",
+  "heldout": {
+    "recovery_method": "main.py train_test_split on sorted shared IDs; seed=42, stratify=ordered binary CLASS, test_size=0.2",
+    "excluded_count": 81,
+    "excluded_id_sha256": "669f6df537a7704a9e130f32a4cb116f7dbe14f5940963fc65c093145e5945d0",
+    "used_for_cv": false
+  },
+  "training_pool_count": 323,
+  "training_pool_support": {
+    "1": 237,
+    "2": 86
+  },
+  "cv": {
+    "type": "StratifiedKFold",
+    "folds": 5,
+    "seed": 42,
+    "same_partitions_as_2A_2B": true
+  },
+  "architecture": "2B omics autoencoders + fixed LogisticRegression(max_iter=2000, class_weight=balanced); no calibration",
+  "augmentation": {
+    "arms": [
+      "none",
+      "bootstrap",
+      "ctgan"
+    ],
+    "ctgan_epochs_full": 100,
+    "pac": 10,
+    "max_batch": 80,
+    "bootstrap_noise_std": 0.01
+  },
+  "versions": {
+    "python": "3.12.14",
+    "numpy": "2.3.5",
+    "pandas": "2.2.3",
+    "scikit_learn": "1.8.0",
+    "tensorflow": "2.21.0",
+    "sdv": "1.38.5",
+    "ctgan": "0.12.1",
+    "torch": "2.14.1"
+  },
+  "environment": {
+    "TF_ENABLE_ONEDNN_OPTS": "0",
+    "TF_NUM_INTRAOP_THREADS": "2",
+    "TF_NUM_INTEROP_THREADS": "2"
+  },
+  "completed_folds": [
+    {
+      "fold": 1,
+      "train_count": 258,
+      "validation_count": 65,
+      "conditions": {
+        "ctgan": {
+          "augmentation": {
+            "requested_method": "ctgan",
+            "actual_method": "ctgan",
+            "minority_code": "2",
+            "before": {
+              "1": 189,
+              "2": 69
+            },
+            "added": 120,
+            "seed": 43,
+            "epochs": 2,
+            "batch_size": 60,
+            "pac": 10,
+            "enable_gpu": false,
+            "process_isolation": "separate SDV/PyTorch worker; only outer-training minority latents transferred",
+            "quality": {
+              "mean_absolute_standardized_mean_gap": 0.6632658317939256,
+              "synthetic_to_nearest_real_distance_min": 10.969001062411808,
+              "synthetic_to_nearest_real_distance_median": 15.317571365807131,
+              "rounded_6dp_unique_fraction": 1.0,
+              "interpretation": "Descriptive checks only; no fidelity, privacy, or clinical validity claim"
+            },
+            "after": {
+              "1": 189,
+              "2": 189
+            }
+          },
+          "smoke_only_no_model_metrics": true
+        }
+      }
+    }
+  ],
+  "aggregate": null,
+  "tensorflow_determinism": "requested",
+  "prior_assertion_reproduction": {
+    "input": "86x40 deterministic dummy data",
+    "old_batch_size": 86,
+    "pac": 10,
+    "exception_type": "AssertionError",
+    "traceback": "Traceback (most recent call last):\n  File \"/workspace/scratch/f8ad98408937/oncoassist_3a/ctgan_worker.py\", line 44, in main\n    train_and_sample(dummy, 1, 1, 86, 10, 42)\n  File \"/workspace/scratch/f8ad98408937/oncoassist_3a/ctgan_worker.py\", line 27, in train_and_sample\n    synthesizer.fit(frame)\n  File \"/workspace/scratch/f8ad98408937/oncoassist_tf_venv/lib/python3.12/site-packages/sdv/single_table/base.py\", line 779, in fit\n    self.fit_processed_data(processed_data)\n  File \"/workspace/scratch/f8ad98408937/oncoassist_tf_venv/lib/python3.12/site-packages/sdv/single_table/base.py\", line 748, in fit_processed_data\n    self._fit(processed_data)\n  File \"/workspace/scratch/f8ad98408937/oncoassist_tf_venv/lib/python3.12/site-packages/sdv/single_table/ctgan.py\", line 308, in _fit\n    self._model.fit(processed_data, discrete_columns=discrete_columns)\n  File \"/workspace/scratch/f8ad98408937/oncoassist_tf_venv/lib/python3.12/site-packages/ctgan/synthesizers/base.py\", line 52, in wrapper\n    return function(self, *args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/scratch/f8ad98408937/oncoassist_tf_venv/lib/python3.12/site-packages/ctgan/synthesizers/ctgan.py\", line 424, in fit\n    y_fake = discriminator(fake_cat)\n             ^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/scratch/f8ad98408937/oncoassist_tf_venv/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1783, in _wrapped_call_impl\n    return self._call_impl(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/scratch/f8ad98408937/oncoassist_tf_venv/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1794, in _call_impl\n    return forward_call(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/workspace/scratch/f8ad98408937/oncoassist_tf_venv/lib/python3.12/site-packages/ctgan/synthesizers/ctgan.py\", line 61, in forward\n    assert input_.size()[0] % self.pac == 0\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+  },
+  "elapsed_seconds": 29.524536244000046
+}
