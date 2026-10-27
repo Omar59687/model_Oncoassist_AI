@@ -1,0 +1,121 @@
+{
+  "experiment": "nested AE + CTGAN + tuned RBF SVM vs nested AE + tuned RBF SVM",
+  "status": "blocked_missing_tensorflow",
+  "created_utc": "2026-10-27T15:53:57.388287+00:00",
+  "environment": {
+    "python": "3.12.14",
+    "numpy": "2.3.5",
+    "pandas": "2.2.3",
+    "scikit_learn": "1.8.0",
+    "tensorflow": null,
+    "sdv": null,
+    "ctgan": null,
+    "torch": null
+  },
+  "label_semantics": "unverified; CLASS codes 1 and 2 only",
+  "provided_reference_no_augmentation_tuned_rbf_svm": {
+    "source": "user-supplied context; not regenerated in this run",
+    "accuracy": 0.7399,
+    "precision_class_2": 0.5085,
+    "recall_class_2": 0.6977,
+    "f1_class_2": 0.5882,
+    "pooled_roc_auc": 0.8087
+  },
+  "protocol": {
+    "outer_folds": 5,
+    "inner_folds": 3,
+    "seed": 42,
+    "selection_metric": "inner OOF Class-2 F1",
+    "arms": [
+      "none",
+      "ctgan"
+    ],
+    "svm_grid": [
+      {
+        "C": 0.5,
+        "gamma": "scale",
+        "class_weight": "balanced",
+        "weight_label": "balanced"
+      },
+      {
+        "C": 0.5,
+        "gamma": "scale",
+        "class_weight": {
+          "1": 1.0,
+          "2": 1.5
+        },
+        "weight_label": "code2_x1.5"
+      },
+      {
+        "C": 0.5,
+        "gamma": 0.01,
+        "class_weight": "balanced",
+        "weight_label": "balanced"
+      },
+      {
+        "C": 0.5,
+        "gamma": 0.01,
+        "class_weight": {
+          "1": 1.0,
+          "2": 1.5
+        },
+        "weight_label": "code2_x1.5"
+      },
+      {
+        "C": 2.0,
+        "gamma": "scale",
+        "class_weight": "balanced",
+        "weight_label": "balanced"
+      },
+      {
+        "C": 2.0,
+        "gamma": "scale",
+        "class_weight": {
+          "1": 1.0,
+          "2": 1.5
+        },
+        "weight_label": "code2_x1.5"
+      },
+      {
+        "C": 2.0,
+        "gamma": 0.01,
+        "class_weight": "balanced",
+        "weight_label": "balanced"
+      },
+      {
+        "C": 2.0,
+        "gamma": 0.01,
+        "class_weight": {
+          "1": 1.0,
+          "2": 1.5
+        },
+        "weight_label": "code2_x1.5"
+      }
+    ],
+    "threshold_selection": "maximize inner OOF Class-2 F1; tie-break by precision and closeness to 0.5",
+    "arm_tie_break": "no augmentation",
+    "ctgan_epochs": 20,
+    "ctgan_pac": 10,
+    "ctgan_batch_rule": "largest multiple of lcm(2,10) no greater than min(80, minority training rows)",
+    "ctgan_execution": "existing ctgan_worker.py; CPU-only, separate SDV/PyTorch process",
+    "feature_selection": "released 79 features; upstream selection timing unknown; not reselected",
+    "holdout_usage": "excluded from all fitting, inner selection, and outer evaluation"
+  },
+  "aligned_sample_count": 404,
+  "feature_count": 79,
+  "training_pool_count": 323,
+  "training_pool_support": {
+    "1": 237,
+    "2": 86
+  },
+  "heldout_exclusion": {
+    "excluded_count": 81,
+    "excluded_id_sha256": "669f6df537a7704a9e130f32a4cb116f7dbe14f5940963fc65c093145e5945d0",
+    "used_for_model_selection_or_evaluation": false
+  },
+  "execution_note": "TensorFlow is unavailable; no autoencoders, CTGAN, or model comparisons were run.",
+  "error": {
+    "type": "ModuleNotFoundError",
+    "message": "No module named 'tensorflow'"
+  }
+}
