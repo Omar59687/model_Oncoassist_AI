@@ -1,0 +1,35 @@
+{
+  "experiment": "nested latent classifier and threshold selection",
+  "label_semantics": "unverified; CLASS codes 1 and 2 only",
+  "created_utc": "2026-10-27T14:44:41.776396+00:00",
+  "environment": {
+    "python": "3.12.14",
+    "numpy": "2.3.5",
+    "pandas": "2.2.3",
+    "scikit_learn": "1.8.0",
+    "tensorflow": null
+  },
+  "protocol": {
+    "outer_folds": 5,
+    "inner_folds": 3,
+    "seed": 42,
+    "selection_metric": "inner OOF Class-2 F1",
+    "threshold_selection": "max inner OOF Class-2 F1; ties by precision, nearest 0.5",
+    "feature_selection": "not repeated; released 79-feature provenance is uncertain",
+    "holdout_use": "excluded from model fitting, selection and evaluation"
+  },
+  "aligned_sample_count": 404,
+  "feature_count": 79,
+  "heldout_exclusion": {
+    "excluded_count": 81,
+    "excluded_id_sha256": "669f6df537a7704a9e130f32a4cb116f7dbe14f5940963fc65c093145e5945d0",
+    "used_for_model_selection_or_evaluation": false
+  },
+  "training_pool_count": 323,
+  "training_pool_support": {
+    "1": 237,
+    "2": 86
+  },
+  "status": "blocked_missing_dependency",
+  "execution_note": "TensorFlow is not installed in the execution environment; the fold-isolated autoencoder experiment could not be run. No new performance metrics were generated."
+}
